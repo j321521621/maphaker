@@ -7,6 +7,7 @@
 #include <TlHelp32.h>
 #include <string>
 using std::string;
+using std::wstring;
 
 #pragma comment(lib, "Version.lib")
 
@@ -111,45 +112,119 @@ DWORD GetGameDLLAddr(HANDLE hWar3Handle,WCHAR * ModuleName)
 	return 0;  
 };  
 
-enum WC3VER{_UN,_120E,_124B,_124E,_125B,_126B};
+
+wstring GetFileVer(wstring FileName) 
+{ 
+	TCHAR  SubBlock[64]; 
+	DWORD  InfoSize; 
+	InfoSize = GetFileVersionInfoSize(FileName.c_str(),NULL);        if(InfoSize==0) return 0; 
+	TCHAR *InfoBuf = new TCHAR[InfoSize];  
+	GetFileVersionInfo(FileName.c_str(),0,InfoSize,InfoBuf); 
+	unsigned int  cbTranslate = 0; 
+	struct LANGANDCODEPAGE
+	{ 
+		WORD wLanguage; 
+		WORD wCodePage; 
+	}
+	*lpTranslate; 
+	VerQueryValue(InfoBuf, TEXT("\\VarFileInfo\\Translation"), 
+		(LPVOID*)&lpTranslate,&cbTranslate); 
+	// Read the file description for each language and code page. 
+	wsprintf( SubBlock,  
+		TEXT("\\StringFileInfo\\%04x%04x\\FileVersion"), 
+		lpTranslate[0].wLanguage, 
+		lpTranslate[0].wCodePage); 
+	void *lpBuffer=NULL; 
+	unsigned int dwBytes=0; 
+	VerQueryValue(InfoBuf, SubBlock, &lpBuffer, &dwBytes);  
+	wstring ret((LPWSTR)lpBuffer,dwBytes-1);
+	delete[] InfoBuf; 
+	return ret; 
+}
 
 
-void PATCH(HANDLE hWar3Process,DWORD base,DWORD i, string data) 
+
+enum WC3VER{
+	V_124E=124,
+	V_UNKNOWN=0
+};
+
+WC3VER GetWar3Ver(wstring path)
+{
+	wstring version=GetFileVer(path);
+	if(version==L"1, 24, 4, 6387")
+	{
+		return V_124E;
+	}
+	else
+	{
+		return V_UNKNOWN;
+	}
+}
+
+BOOL PATCH(HANDLE hWar3Process,DWORD base,DWORD i, string data) 
 {
 	LPCCH src=data.c_str();
 	DWORD sz=data.size();
-	DWORD ret=WriteProcessMemory(hWar3Process,(LPVOID)(base+i),src,sz,0);
+	printf("patch 0x%08x with %d bytes\n",src,sz);
+	return WriteProcessMemory(hWar3Process,(LPVOID)(base+i),src,sz,0);
 }
 
-BOOL hack(HANDLE hWar3Process,WC3VER War3Ver)
+BOOL hack(HANDLE hWar3Process,WC3VER War3Ver,DWORD base)
 {
-	DWORD base=GetGameDLLAddr(hWar3Process,L"game.dll");
-	if(!base)
-	{
-		return FALSE;
-	}
 
 	switch(War3Ver)
 	{
-	case _124E:
-		//大地图去除迷雾   
+	case V_124E:
+		//大地图去除迷雾
 		PATCH(hWar3Process,base,0x74D1B9,string("\xB2\x00\x90\x90\x90\x90",6));   
 		//大地图显示单位   
 		PATCH(hWar3Process,base,0x39EBBC,"\x75");   
 		PATCH(hWar3Process,base,0x3A2030,"\x90\x90");   
 		PATCH(hWar3Process,base,0x3A20DB,"\x90\x90"); 
 		break;
-	case _UN:
+	case V_UNKNOWN:
 	default:
 		break;
 	}
+
+	return TRUE;
+}
+
+wstring getmodulepath(DWORD pid,wstring modulename)
+{
+	wstring ret;
+	HANDLE hModuleSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE,pid);
+	MODULEENTRY32 module32;
+	module32.dwSize = sizeof(module32);
+	BOOL bResult = Module32First(hModuleSnap,&module32);
+	while(bResult)
+	{
+		wprintf(L"    [%s = %s]\n",module32.szModule,module32.szExePath);
+		if(modulename==module32.szModule)
+		{
+			ret=module32.szExePath;
+			bResult=FALSE;
+		}
+		else
+		{
+			bResult = Module32Next(hModuleSnap,&module32);
+		}
+	}
+
+	CloseHandle(hModuleSnap);
+	return ret;
 }
 
 
 
 int _tmain(int argc, _TCHAR* argv[])
 {
-	if(!EnableDebugPriv())
+	if(EnableDebugPriv())
+	{
+		printf("enabledebugpriv successed\n");
+	}
+	else
 	{
 		printf("enabledebugpriv failed\n");
 		return -1;
@@ -158,20 +233,74 @@ int _tmain(int argc, _TCHAR* argv[])
 	DWORD pid=GetPIDForProcess(L"War3.exe");
 	if(!pid)
 	{
-		printf("not found War3.exe\n");
+		pid=GetPIDForProcess(L"War3.exe *32");
+	}
+	if(!pid)
+	{
+		pid=GetPIDForProcess(L"war3.exe");
+	}
+	if(!pid)
+	{
+		pid=GetPIDForProcess(L"war3.exe *32");
+	}
+
+	if(pid)
+	{
+		printf("find War3.exe successed: %d\n",pid);
+	}
+	else
+	{
+		printf("find War3.exe failed\n");
 		return -2;
 	}
 
-	HANDLE hWar3Process=OpenProcess(PROCESS_ALL_ACCESS,FALSE,pid);
-	if(!hWar3Process)
+	wstring gamedllpath=getmodulepath(pid,L"Game.dll");
+	if(gamedllpath.size())
 	{
-		printf("openprocess failed\n");
+		wprintf(L"get game.dll path successed: %s\n",gamedllpath.c_str());
+	}
+	else
+	{
+		printf("get game.dll path failed\n");
 		return -3;
 	}
 
 
+	WC3VER war3ver=GetWar3Ver(gamedllpath);
+	if(war3ver!=V_UNKNOWN)
+	{
+		printf("get game.dll version successed: %d\n",war3ver);
+	}
+	else
+	{
+		printf("get game.dll version failed\n");
+		return -4;
+	}
 
-	hack(hWar3Process,_124E);
+	HANDLE hWar3Process=OpenProcess(PROCESS_ALL_ACCESS,FALSE,pid);
+	if(hWar3Process)
+	{
+		printf("openprocess successed\n");
+	}
+	else
+	{
+		printf("openprocess failed\n");
+		return -5;
+	}
+
+	DWORD base=GetGameDLLAddr(hWar3Process,L"game.dll");
+	if(base)
+	{
+		printf("get dll base adreess successed: 0x%08x\n",base);
+	}
+	else
+	{
+		printf("get dll base adreess failed\n");
+		return -6;
+	}
+
+	DWORD rslt=hack(hWar3Process,war3ver,base);
+	printf("mapkack successd\n");
 	return 0;
 }
 
