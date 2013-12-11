@@ -149,6 +149,11 @@ enum WC3VER{
 	V_UNKNOWN=0
 };
 
+enum OPENTYPE{
+	BIG,
+	SMALL
+};
+
 WC3VER GetWar3Ver(wstring path)
 {
 	wstring version=GetFileVer(path);
@@ -162,7 +167,48 @@ WC3VER GetWar3Ver(wstring path)
 	}
 }
 
-BOOL PATCH(HANDLE hWar3Process,DWORD base,DWORD i, string data) 
+class patcher
+{
+public:
+	patcher (HANDLE hWar3Process,DWORD base,DWORD i, string data):
+	  m_process(hWar3Process),
+	  m_addr((LPVOID)(base+i)),
+	  m_buf(data)
+	{
+		
+	}
+
+	BOOL patch()
+	{
+		DWORD tempsz=m_buf.size();
+		char* tempbuf=new char[tempsz];
+		DWORD readbyte=0;
+
+		ReadProcessMemory(m_process,m_addr,tempbuf,tempsz,&readbyte);
+		if(readbyte!=m_buf.size())
+		{
+			delete tempbuf;
+			return FALSE;
+		}
+		
+		if(WriteProcessMemory(m_process,m_addr,m_buf.c_str(),m_buf.size(),0))
+		{
+			m_buf=string(tempbuf,tempsz);
+			delete tempbuf;
+			return TRUE;
+		}
+
+		delete tempbuf;
+		return FALSE;
+	}
+
+private:
+	HANDLE m_process;
+	LPVOID m_addr;
+	string m_buf;
+};
+
+BOOL patch(HANDLE hWar3Process,DWORD base,DWORD i, string data) 
 {
 	LPCCH src=data.c_str();
 	DWORD sz=data.size();
@@ -170,25 +216,46 @@ BOOL PATCH(HANDLE hWar3Process,DWORD base,DWORD i, string data)
 	return WriteProcessMemory(hWar3Process,(LPVOID)(base+i),src,sz,0);
 }
 
-BOOL hack(HANDLE hWar3Process,WC3VER War3Ver,DWORD base)
+BOOL hack(HANDLE hWar3Process,WC3VER War3Ver,DWORD base,OPENTYPE type)
 {
-
 	switch(War3Ver)
 	{
 	case V_124E:
-		//大地图去除迷雾
-		PATCH(hWar3Process,base,0x74D1B9,string("\xB2\x00\x90\x90\x90\x90",6));   
-		//大地图显示单位   
-		PATCH(hWar3Process,base,0x39EBBC,"\x75");   
-		PATCH(hWar3Process,base,0x3A2030,"\x90\x90");   
-		PATCH(hWar3Process,base,0x3A20DB,"\x90\x90"); 
-		break;
+		{
+			switch(type)
+			{
+			case BIG:
+				{
+					patcher p2(hWar3Process,base,0x39EBBC,"\x75");   
+					patcher p3(hWar3Process,base,0x3A2030,"\x90\x90");   
+					patcher p4(hWar3Process,base,0x3A20DB,"\x90\x90"); 
+
+					p2.patch();
+					p3.patch();
+					p4.patch();
+					Sleep(20);
+					p2.patch();
+					p3.patch();
+					p4.patch();
+				}
+				break;
+			case SMALL: 
+				{
+					patcher p2(hWar3Process,base,0x361F7C,string("\x00",1));
+
+					p2.patch();
+					Sleep(300);
+					p2.patch();
+				}
+				break;
+			}
+			return TRUE;
+			break;
+		}
 	case V_UNKNOWN:
-	default:
-		break;
+		return FALSE;
 	}
 
-	return TRUE;
 }
 
 wstring getmodulepath(DWORD pid,wstring modulename)
@@ -218,8 +285,10 @@ wstring getmodulepath(DWORD pid,wstring modulename)
 
 
 
-int _tmain(int argc, _TCHAR* argv[])
+
+DWORD openmap(OPENTYPE type)
 {
+
 	if(EnableDebugPriv())
 	{
 		printf("enabledebugpriv successed\n");
@@ -227,7 +296,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	else
 	{
 		printf("enabledebugpriv failed\n");
-		return -1;
+		return FALSE;
 	}
 
 	DWORD pid=GetPIDForProcess(L"War3.exe");
@@ -251,7 +320,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	else
 	{
 		printf("find War3.exe failed\n");
-		return -2;
+		return FALSE;
 	}
 
 	wstring gamedllpath=getmodulepath(pid,L"Game.dll");
@@ -262,7 +331,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	else
 	{
 		printf("get game.dll path failed\n");
-		return -3;
+		return FALSE;
 	}
 
 
@@ -274,7 +343,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	else
 	{
 		printf("get game.dll version failed\n");
-		return -4;
+		return FALSE;
 	}
 
 	HANDLE hWar3Process=OpenProcess(PROCESS_ALL_ACCESS,FALSE,pid);
@@ -285,8 +354,9 @@ int _tmain(int argc, _TCHAR* argv[])
 	else
 	{
 		printf("openprocess failed\n");
-		return -5;
+		return FALSE;
 	}
+
 
 	DWORD base=GetGameDLLAddr(hWar3Process,L"game.dll");
 	if(base)
@@ -296,11 +366,52 @@ int _tmain(int argc, _TCHAR* argv[])
 	else
 	{
 		printf("get dll base adreess failed\n");
-		return -6;
+		CloseHandle(hWar3Process);
+		return FALSE;
 	}
 
-	DWORD rslt=hack(hWar3Process,war3ver,base);
+	//DWORD rslt=hack(hWar3Process,war3ver,base,type);
 	printf("mapkack successd\n");
-	return 0;
+	CloseHandle(hWar3Process);
+	return TRUE;
 }
 
+int _tmain(int argc, _TCHAR* argv[])
+{
+	if(!RegisterHotKey(NULL,0,MOD_NOREPEAT,VK_OEM_PLUS))
+	{
+		printf("registerhotkey failed\n");
+		return -1;
+	}
+
+	if(!RegisterHotKey(NULL,1,MOD_NOREPEAT,VK_OEM_MINUS))
+	{
+		printf("registerhotkey failed\n");
+		return -1;
+	}
+
+	MSG msg;
+	BOOL bRet;
+
+	while( (bRet = GetMessage( &msg, NULL, 0, 0 )) != 0)
+	{ 
+		TranslateMessage(&msg);
+		if(msg.message==WM_HOTKEY)
+		{
+			if(msg.wParam==0)
+			{
+				printf("====get hot key for open big map====\n");
+				openmap(BIG);
+			}
+			if(msg.wParam==1)
+			{
+				printf("====get hot key for open mini map====\n");
+				openmap(SMALL);
+			}
+		}
+		else
+		{
+			DispatchMessage(&msg);
+		}
+	}
+}
